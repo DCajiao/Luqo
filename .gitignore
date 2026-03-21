@@ -10,7 +10,6 @@ local_server/
 
 # GCP credentials
 credentials/
-*.json
 
 # Node
 node_modules/
