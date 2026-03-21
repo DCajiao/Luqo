@@ -1,0 +1,69 @@
+services:
+  frontend:
+    build:
+      context: ./microservices/frontend
+      dockerfile: Dockerfile
+    ports:
+      - "3000:3000"
+    environment:
+      - VITE_API_URL=http://localhost:8000
+    depends_on:
+      - backend
+    networks:
+      - luqo-network
+    volumes:
+      - ./microservices/frontend/src:/app/src
+
+  backend:
+    build:
+      context: ./microservices/backend
+      dockerfile: Dockerfile
+    ports:
+      - "8000:8000"
+    environment:
+      - DATABASE_URL=postgresql://luqo:luqo123@database:5432/luqo_db
+      - JWT_SECRET=${JWT_SECRET:-super-secret-jwt-key-change-in-production}
+      - JWT_EXPIRES_IN=7d
+      - GCP_PROJECT_ID=${GCP_PROJECT_ID}
+      - GCP_LOCATION=${GCP_LOCATION:-us}
+      - DOCUMENT_AI_PROCESSOR_ID=${DOCUMENT_AI_PROCESSOR_ID}
+      - GOOGLE_APPLICATION_CREDENTIALS=/app/credentials/gcp-key.json
+      - GEMINI_API_KEY=${GEMINI_API_KEY}
+      - PORT=8000
+      - NODE_ENV=development
+    depends_on:
+      database:
+        condition: service_healthy
+    networks:
+      - luqo-network
+    volumes:
+      - uploads-data:/app/uploads
+      - ./credentials:/app/credentials:ro
+
+  database:
+    build:
+      context: ./microservices/database
+      dockerfile: Dockerfile
+    ports:
+      - "5432:5432"
+    environment:
+      - POSTGRES_DB=luqo_db
+      - POSTGRES_USER=luqo
+      - POSTGRES_PASSWORD=luqo123
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U luqo -d luqo_db"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    networks:
+      - luqo-network
+
+networks:
+  luqo-network:
+    driver: bridge
+
+volumes:
+  postgres-data:
+  uploads-data:
