@@ -85,6 +85,7 @@ export default function CameraCapture({ onClose, onUploaded }) {
   const fileRef = useRef(null)
 
   const [phase, setPhase] = useState('idle') // idle | camera | preview | uploading | done
+  const [sourceMode, setSourceMode] = useState(null) // 'camera' | 'file'
   const [capturedBlob, setCapturedBlob] = useState(null)
   const [capturedURL, setCapturedURL] = useState(null)
   const [progress, setProgress] = useState(0)
@@ -105,6 +106,7 @@ export default function CameraCapture({ onClose, onUploaded }) {
         video: { facingMode: { ideal: 'environment' }, width: { ideal: 1920 }, height: { ideal: 1080 } },
       })
       streamRef.current = stream
+      setSourceMode('camera')
       setPhase('camera') // render <video> first, then useEffect sets srcObject
     } catch (e) {
       setError(`No se pudo acceder a la cámara: ${e.message || 'Verifica los permisos del navegador.'}`)
@@ -134,7 +136,11 @@ export default function CameraCapture({ onClose, onUploaded }) {
     URL.revokeObjectURL(capturedURL)
     setCapturedBlob(null)
     setCapturedURL(null)
-    startCamera()
+    if (sourceMode === 'camera') {
+      startCamera()
+    } else {
+      setPhase('idle')
+    }
   }
 
   const handleFile = (e) => {
@@ -142,6 +148,7 @@ export default function CameraCapture({ onClose, onUploaded }) {
     if (!file) return
     setCapturedBlob(file)
     setCapturedURL(URL.createObjectURL(file))
+    setSourceMode('file')
     setPhase('preview')
   }
 
@@ -193,7 +200,7 @@ export default function CameraCapture({ onClose, onUploaded }) {
               <div style={{ ...s.actions, flexDirection: 'column' }}>
                 <button style={s.btnPrimary} onClick={startCamera}>📷 Abrir cámara</button>
               </div>
-              <input ref={fileRef} type="file" accept="image/*" style={{ display: 'none' }} onChange={handleFile} />
+              <input ref={fileRef} type="file" accept="image/jpeg,image/png,image/webp" style={{ display: 'none' }} onChange={handleFile} />
             </>
           )}
 

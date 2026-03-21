@@ -51,7 +51,15 @@ router.post('/', authenticate, upload.single('invoice'), async (req, res) => {
     const { structured, insights } = await analyzeInvoice(rawText)
     console.log('[Gemini] Analysis complete:', JSON.stringify(structured, null, 2))
 
-    const parseDate = (d) => { try { return d ? new Date(d) : null } catch { return null } }
+    const parseDate = (d) => {
+      if (!d) return null
+      // Handle DD/MM/YYYY format from Gemini
+      const ddmmyyyy = d.match(/^(\d{1,2})\/(\d{1,2})\/(\d{4})$/)
+      if (ddmmyyyy) return `${ddmmyyyy[3]}-${ddmmyyyy[2].padStart(2,'0')}-${ddmmyyyy[1].padStart(2,'0')}`
+      // Handle YYYY-MM-DD and ISO formats
+      const date = new Date(d)
+      return isNaN(date.getTime()) ? null : date.toISOString().slice(0, 10)
+    }
 
     // 3. Save to DB
     const { rows: [invoice] } = await db.query(

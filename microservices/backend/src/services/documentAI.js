@@ -12,7 +12,11 @@ const processorName = () =>
  * @param {string} mimeType
  * @returns {Promise<string>} raw text
  */
+const SUPPORTED_MIME_TYPES = new Set(['image/jpeg', 'image/png', 'image/webp', 'image/tiff', 'application/pdf'])
+
 async function extractText(imageBuffer, mimeType = 'image/jpeg') {
+  const safeMimeType = SUPPORTED_MIME_TYPES.has(mimeType) ? mimeType : 'image/jpeg'
+  mimeType = safeMimeType
   const [result] = await client.processDocument({
     name: processorName(),
     rawDocument: { content: imageBuffer.toString('base64'), mimeType },
