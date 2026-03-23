@@ -2,7 +2,7 @@ const router = require('express').Router()
 const multer = require('multer')
 const path = require('path')
 const fs = require('fs')
-const db = require('../db')
+const dbClient = require('../dbClient')
 const authenticate = require('../middleware/authenticate')
 const { extractText } = require('../services/documentAI')
 const { analyzeInvoice } = require('../services/gemini')
@@ -23,6 +23,16 @@ const upload = multer({
   },
 })
 
+const parseDate = (d) => {
+  if (!d) return null
+  // Handle DD/MM/YYYY format from Gemini
+  const ddmmyyyy = d.match(/^(\d{1,2})\/(\d{1,2})\/(\d{4})$/)
+  if (ddmmyyyy) return `${ddmmyyyy[3]}-${ddmmyyyy[2].padStart(2, '0')}-${ddmmyyyy[1].padStart(2, '0')}`
+  // Handle YYYY-MM-DD and ISO formats
+  const date = new Date(d)
+  return isNaN(date.getTime()) ? null : date.toISOString().slice(0, 10)
+}
+
 // POST /api/invoices — upload & process
 router.post('/', authenticate, upload.single('invoice'), async (req, res) => {
   if (!req.file) return res.status(400).json({ message: 'Se requiere una imagen de factura' })
@@ -30,11 +40,8 @@ router.post('/', authenticate, upload.single('invoice'), async (req, res) => {
   // Create a pending record immediately
   let invoiceId
   try {
-    const { rows } = await db.query(
-      `INSERT INTO invoices (user_id, image_path, status) VALUES ($1, $2, 'processing') RETURNING id`,
-      [req.user.sub, req.file.filename],
-    )
-    invoiceId = rows[0].id
+    const { id } = await dbClient.createInvoice({ user_id: req.user.sub, image_path: req.file.filename })
+    invoiceId = id
   } catch (err) {
     console.error('DB insert error:', err)
     return res.status(500).json({ message: 'Error al crear el registro' })
@@ -51,67 +58,32 @@ router.post('/', authenticate, upload.single('invoice'), async (req, res) => {
     const { structured, insights } = await analyzeInvoice(rawText)
     console.log('[Gemini] Analysis complete:', JSON.stringify(structured, null, 2))
 
-    const parseDate = (d) => {
-      if (!d) return null
-      // Handle DD/MM/YYYY format from Gemini
-      const ddmmyyyy = d.match(/^(\d{1,2})\/(\d{1,2})\/(\d{4})$/)
-      if (ddmmyyyy) return `${ddmmyyyy[3]}-${ddmmyyyy[2].padStart(2,'0')}-${ddmmyyyy[1].padStart(2,'0')}`
-      // Handle YYYY-MM-DD and ISO formats
-      const date = new Date(d)
-      return isNaN(date.getTime()) ? null : date.toISOString().slice(0, 10)
+    // 3. Save to DB via db-service
+    const invoice = await dbClient.updateInvoice(invoiceId, {
+      vendor_name:     structured.vendor_name,
+      invoice_number:  structured.invoice_number,
+      invoice_date:    parseDate(structured.invoice_date),
+      due_date:        parseDate(structured.due_date),
+      subtotal:        structured.subtotal,
+      tax_amount:      structured.tax_amount,
+      total_amount:    structured.total_amount,
+      currency:        structured.currency || 'COP',
+      extracted_data:  JSON.stringify({ raw_text: rawText }),
+      gemini_insights: insights,
+    })
+
+    // 4. Insert line items
+    const validItems = (structured.line_items || []).filter((i) => i.description || i.total_price)
+    if (validItems.length > 0) {
+      await dbClient.bulkInsertItems(invoiceId, validItems)
     }
 
-    // 3. Save to DB
-    const { rows: [invoice] } = await db.query(
-      `UPDATE invoices SET
-        vendor_name     = $1,
-        invoice_number  = $2,
-        invoice_date    = $3,
-        due_date        = $4,
-        subtotal        = $5,
-        tax_amount      = $6,
-        total_amount    = $7,
-        currency        = $8,
-        extracted_data  = $9,
-        gemini_insights = $10,
-        status          = 'processed'
-       WHERE id = $11
-       RETURNING *`,
-      [
-        structured.vendor_name,
-        structured.invoice_number,
-        parseDate(structured.invoice_date),
-        parseDate(structured.due_date),
-        structured.subtotal,
-        structured.tax_amount,
-        structured.total_amount,
-        structured.currency || 'COP',
-        JSON.stringify({ raw_text: rawText }),
-        insights,
-        invoiceId,
-      ],
-    )
-
-    // 4. Insert line items from Gemini structured output
-    if (structured.line_items?.length > 0) {
-      const itemValues = structured.line_items
-        .filter((i) => i.description || i.total_price)
-        .map((i) => `('${invoiceId}', ${sqlStr(i.description)}, ${i.quantity ?? 'NULL'}, ${i.unit_price ?? 'NULL'}, ${i.total_price ?? 'NULL'})`)
-        .join(', ')
-
-      if (itemValues) {
-        await db.query(
-          `INSERT INTO invoice_items (invoice_id, description, quantity, unit_price, total_price) VALUES ${itemValues}`,
-        )
-      }
-    }
-
-    // 5. Fetch full invoice with items
-    const { rows: items } = await db.query('SELECT * FROM invoice_items WHERE invoice_id = $1', [invoiceId])
+    // 5. Fetch items and return full invoice
+    const items = await dbClient.getItems(invoiceId)
     res.status(201).json({ invoice: { ...invoice, invoice_items: items } })
   } catch (err) {
     console.error('Processing error:', err)
-    await db.query(`UPDATE invoices SET status = 'failed' WHERE id = $1`, [invoiceId])
+    await dbClient.setInvoiceStatus(invoiceId, 'failed').catch(() => {})
     res.status(500).json({ message: 'Error al procesar la factura con IA', detail: err.message })
   }
 })
@@ -119,11 +91,8 @@ router.post('/', authenticate, upload.single('invoice'), async (req, res) => {
 // GET /api/invoices
 router.get('/', authenticate, async (req, res) => {
   try {
-    const { rows } = await db.query(
-      'SELECT * FROM invoices WHERE user_id = $1 ORDER BY created_at DESC',
-      [req.user.sub],
-    )
-    res.json({ invoices: rows })
+    const invoices = await dbClient.listInvoices(req.user.sub)
+    res.json({ invoices })
   } catch (err) {
     console.error(err)
     res.status(500).json({ message: 'Error al obtener facturas' })
@@ -133,15 +102,11 @@ router.get('/', authenticate, async (req, res) => {
 // GET /api/invoices/:id
 router.get('/:id', authenticate, async (req, res) => {
   try {
-    const { rows: [invoice] } = await db.query(
-      'SELECT * FROM invoices WHERE id = $1 AND user_id = $2',
-      [req.params.id, req.user.sub],
-    )
-    if (!invoice) return res.status(404).json({ message: 'Factura no encontrada' })
-
-    const { rows: items } = await db.query('SELECT * FROM invoice_items WHERE invoice_id = $1', [req.params.id])
+    const invoice = await dbClient.getInvoice(req.params.id, req.user.sub)
+    const items = await dbClient.getItems(req.params.id)
     res.json({ invoice: { ...invoice, invoice_items: items } })
   } catch (err) {
+    if (err.status === 404) return res.status(404).json({ message: 'Factura no encontrada' })
     console.error(err)
     res.status(500).json({ message: 'Error al obtener la factura' })
   }
@@ -153,15 +118,12 @@ router.get('/:id/image', (req, res, next) => {
   next()
 }, authenticate, async (req, res) => {
   try {
-    const { rows: [invoice] } = await db.query(
-      'SELECT image_path FROM invoices WHERE id = $1 AND user_id = $2',
-      [req.params.id, req.user.sub],
-    )
-    if (!invoice) return res.status(404).json({ message: 'No encontrada' })
+    const invoice = await dbClient.getInvoice(req.params.id, req.user.sub)
     const filePath = path.join(UPLOADS_DIR, invoice.image_path)
     if (!fs.existsSync(filePath)) return res.status(404).json({ message: 'Imagen no encontrada' })
     res.sendFile(filePath)
   } catch (err) {
+    if (err.status === 404) return res.status(404).json({ message: 'No encontrada' })
     console.error(err)
     res.status(500).json({ message: 'Error al obtener la imagen' })
   }
@@ -170,22 +132,15 @@ router.get('/:id/image', (req, res, next) => {
 // DELETE /api/invoices/:id
 router.delete('/:id', authenticate, async (req, res) => {
   try {
-    const { rows: [invoice] } = await db.query(
-      'DELETE FROM invoices WHERE id = $1 AND user_id = $2 RETURNING image_path',
-      [req.params.id, req.user.sub],
-    )
-    if (!invoice) return res.status(404).json({ message: 'Factura no encontrada' })
-
-    const filePath = path.join(UPLOADS_DIR, invoice.image_path)
+    const { image_path } = await dbClient.deleteInvoice(req.params.id, req.user.sub)
+    const filePath = path.join(UPLOADS_DIR, image_path)
     if (fs.existsSync(filePath)) fs.unlinkSync(filePath)
-
     res.json({ message: 'Factura eliminada' })
   } catch (err) {
+    if (err.status === 404) return res.status(404).json({ message: 'Factura no encontrada' })
     console.error(err)
     res.status(500).json({ message: 'Error al eliminar la factura' })
   }
 })
-
-const sqlStr = (v) => v == null ? 'NULL' : `'${v.replace(/'/g, "''")}'`
 
 module.exports = router

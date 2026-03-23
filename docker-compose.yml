@@ -21,7 +21,7 @@ services:
     ports:
       - "8000:8000"
     environment:
-      - DATABASE_URL=postgresql://luqo:luqo123@database:5432/luqo_db
+      - DB_SERVICE_URL=http://db-service:3001
       - JWT_SECRET=${JWT_SECRET:-super-secret-jwt-key-change-in-production}
       - JWT_EXPIRES_IN=7d
       - GCP_PROJECT_ID=${GCP_PROJECT_ID}
@@ -32,13 +32,31 @@ services:
       - PORT=8000
       - NODE_ENV=development
     depends_on:
-      database:
+      db-service:
         condition: service_healthy
     networks:
       - luqo-network
     volumes:
       - uploads-data:/app/uploads
       - ./credentials:/app/credentials:ro
+
+  db-service:
+    build:
+      context: ./microservices/db-service
+      dockerfile: Dockerfile
+    environment:
+      - DATABASE_URL=postgresql://luqo:luqo123@database:5432/luqo_db
+      - PORT=3001
+    depends_on:
+      database:
+        condition: service_healthy
+    networks:
+      - luqo-network
+    healthcheck:
+      test: ["CMD-SHELL", "node -e \"require('http').get('http://localhost:3001/health', r => process.exit(r.statusCode === 200 ? 0 : 1)).on('error', () => process.exit(1))\""]
+      interval: 10s
+      timeout: 5s
+      retries: 5
 
   database:
     build:

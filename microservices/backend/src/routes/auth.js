@@ -1,7 +1,7 @@
 const router = require('express').Router()
 const bcrypt = require('bcryptjs')
 const jwt = require('jsonwebtoken')
-const db = require('../db')
+const dbClient = require('../dbClient')
 
 // POST /api/auth/register
 router.post('/register', async (req, res) => {
@@ -11,15 +11,11 @@ router.post('/register', async (req, res) => {
 
   try {
     const hash = await bcrypt.hash(password, 12)
-    const { rows } = await db.query(
-      'INSERT INTO users (name, email, password) VALUES ($1, $2, $3) RETURNING id, name, email, created_at',
-      [name?.trim() || null, email.toLowerCase().trim(), hash],
-    )
-    const user = rows[0]
+    const user = await dbClient.createUser({ name: name?.trim() || null, email: email.toLowerCase().trim(), password: hash })
     const token = jwt.sign({ sub: user.id, email: user.email }, process.env.JWT_SECRET, { expiresIn: process.env.JWT_EXPIRES_IN || '7d' })
     res.status(201).json({ token, user })
   } catch (err) {
-    if (err.code === '23505') return res.status(409).json({ message: 'Ya existe una cuenta con ese correo' })
+    if (err.status === 409) return res.status(409).json({ message: err.message })
     console.error(err)
     res.status(500).json({ message: 'Error interno del servidor' })
   }
@@ -31,10 +27,7 @@ router.post('/login', async (req, res) => {
   if (!email || !password) return res.status(400).json({ message: 'Email y contraseña son obligatorios' })
 
   try {
-    const { rows } = await db.query('SELECT * FROM users WHERE email = $1', [email.toLowerCase().trim()])
-    const user = rows[0]
-    if (!user) return res.status(401).json({ message: 'Credenciales incorrectas' })
-
+    const user = await dbClient.getUserByEmail(email.toLowerCase().trim())
     const valid = await bcrypt.compare(password, user.password)
     if (!valid) return res.status(401).json({ message: 'Credenciales incorrectas' })
 
@@ -42,6 +35,7 @@ router.post('/login', async (req, res) => {
     const { password: _, ...safeUser } = user
     res.json({ token, user: safeUser })
   } catch (err) {
+    if (err.status === 404) return res.status(401).json({ message: 'Credenciales incorrectas' })
     console.error(err)
     res.status(500).json({ message: 'Error interno del servidor' })
   }

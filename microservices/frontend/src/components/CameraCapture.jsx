@@ -12,6 +12,7 @@ const s = {
     background: 'var(--bg-card)', borderRadius: 'var(--radius-lg)',
     border: '1px solid var(--border)', overflow: 'hidden',
     boxShadow: 'var(--shadow-accent)',
+    maxHeight: '90vh', display: 'flex', flexDirection: 'column',
   },
   header: {
     padding: '18px 20px', borderBottom: '1px solid var(--border)',
@@ -22,7 +23,7 @@ const s = {
     background: 'var(--bg-elevated)', border: '1px solid var(--border)',
     color: 'var(--text-muted)', borderRadius: '8px', padding: '6px 10px', fontSize: '13px',
   },
-  body: { padding: '20px' },
+  body: { padding: '20px', overflowY: 'auto', flex: 1 },
   viewfinder: {
     position: 'relative', borderRadius: '12px', overflow: 'hidden',
     background: '#000', aspectRatio: '4/3', marginBottom: '16px',
