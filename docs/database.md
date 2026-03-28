@@ -4,6 +4,14 @@
 
 PostgreSQL 16 (Alpine). El schema se inicializa automáticamente desde `microservices/database/definitions/schema.sql` cuando el contenedor arranca con el volumen vacío.
 
+## Acceso
+
+**La base de datos solo es accesible desde el `db-service`.** El backend no tiene `DATABASE_URL` ni depencia directa con `pg` — toda operación de datos pasa por la API REST interna del `db-service` (`http://db-service:3001`).
+
+```
+backend  →  db-service (:3001)  →  database (:5432)
+```
+
 ## Diagrama ER
 
 ```
@@ -28,8 +36,8 @@ PostgreSQL 16 (Alpine). El schema se inicializa automáticamente desde `microser
 │ image_path       VARCHAR   nombre del archivo en /uploads    │
 │ vendor_name      VARCHAR   extraído por Gemini               │
 │ invoice_number   VARCHAR   extraído por Gemini               │
-│ invoice_date     DATE      extraído por Gemini               │
-│ due_date         DATE      extraído por Gemini               │
+│ invoice_date     DATE      extraído por Gemini (YYYY-MM-DD)  │
+│ due_date         DATE      extraído por Gemini (YYYY-MM-DD)  │
 │ subtotal         NUMERIC(12,2)                               │
 │ tax_amount       NUMERIC(12,2)                               │
 │ total_amount     NUMERIC(12,2)                               │
@@ -60,7 +68,7 @@ PostgreSQL 16 (Alpine). El schema se inicializa automáticamente desde `microser
 
 ### `users`
 
-Almacena las cuentas de usuario. Las contraseñas se guardan como hash bcrypt (cost factor 12), nunca en texto plano.
+Almacena las cuentas de usuario. Las contraseñas se guardan como hash bcrypt (cost factor 12) — el hashing ocurre en el backend antes de enviar al `db-service`, nunca en texto plano.
 
 | Columna | Tipo | Notas |
 |---|---|---|
@@ -73,6 +81,8 @@ Almacena las cuentas de usuario. Las contraseñas se guardan como hash bcrypt (c
 ### `invoices`
 
 Registro central de cada factura procesada. La columna `extracted_data` guarda el texto crudo del OCR en JSONB para trazabilidad. Los campos estructurados (`vendor_name`, `total_amount`, etc.) son el resultado de la interpretación de Gemini.
+
+Las fechas (`invoice_date`, `due_date`) se almacenan en formato `YYYY-MM-DD`. El backend convierte el formato `DD/MM/YYYY` que puede devolver Gemini antes de enviarlas al `db-service`.
 
 | Columna | Tipo | Notas |
 |---|---|---|
@@ -91,13 +101,15 @@ Document AI extrae texto
      ▼
 Gemini analiza e interpreta
      │
-     ├── éxito → UPDATE status = 'processed'
-     └── error → UPDATE status = 'failed'
+     ├── éxito → PATCH /invoices/:id  →  status = 'processed'
+     └── error → PATCH /invoices/:id/status  →  status = 'failed'
 ```
 
 ### `invoice_items`
 
 Ítems de línea de la factura, extraídos por Gemini del texto crudo. Una factura puede tener cero o más ítems. Si Gemini no identifica ítems individuales, la tabla queda vacía para esa factura.
+
+La inserción se hace en bloque vía `POST /invoices/items/bulk` usando una sola query parametrizada, evitando N queries individuales y SQL injection por interpolación.
 
 | Columna | Tipo | Notas |
 |---|---|---|

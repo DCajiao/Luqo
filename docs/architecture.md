@@ -2,7 +2,7 @@
 
 ## Visión general
 
-Luqo es un sistema de tres microservicios dockerizados que digitalizan facturas de papel usando OCR + IA generativa.
+Luqo es un sistema de **cuatro microservicios** dockerizados que digitalizan facturas de papel usando OCR + IA generativa.
 
 ```
 ┌─────────────────────────────────────────────────────────────────┐
@@ -19,7 +19,7 @@ Luqo es un sistema de tres microservicios dockerizados que digitalizan facturas 
 │  │ login/reg  │  │ getUserMedia()   │  │   InvoiceDetail.jsx  │  │
 │  └────────────┘  └──────────────────┘  └──────────────────────┘  │
 │                     axios + JWT interceptor                      │
-└──────────────────────────────┬──────────────────────────────────┘
+└──────────────────────────────┬───────────────────────────────────┘
                                │ HTTP :8000  (proxy vite → backend)
                                ▼
 ┌──────────────────────────────────────────────────────────────────┐
@@ -37,17 +37,35 @@ Luqo es un sistema de tres microservicios dockerizados que digitalizan facturas 
 │  │  → texto crudo OCR  │   │  → JSON estructurado + insights  │  │
 │  └─────────────────────┘   └──────────────────────────────────┘  │
 │         │ GCP API                      │ Gemini API              │
-└─────────┼────────────────────────────────────────────────────────┘
-          │                            │
-          ▼                            │
-┌─────────────────────┐                │
-│   GCP Document AI   │                │
-│   (OCR processor)   │                ▼
-└─────────────────────┘   ┌────────────────────────┐
-                          │   Gemini 3.1 Pro        │
-                          │   (gemini-3.1-pro-preview)│
-                          └────────────────────────┘
+│                                                                  │
+│  ┌──────────────────────┐                                        │
+│  │  dbClient.js         │  fetch() nativo Node 20                │
+│  │  HTTP → db-service   │                                        │
+│  └──────────┬───────────┘                                        │
+└─────────────┼────────────────────────────────────────────────────┘
+              │              │
+              ▼              ▼
+┌─────────────────────┐   ┌─────────────────────────┐
+│   GCP Document AI   │   │   Gemini 3.1 Pro        │
+│   (OCR processor)   │   │ (gemini-3.1-pro-preview)│
+└─────────────────────┘   └─────────────────────────┘
 
+              │ HTTP :3001 (red interna, sin puerto externo)
+              ▼
+┌──────────────────────────────────────────────────────────────────┐
+│                  DB-SERVICE (Node + Express)                     │
+│                    puerto 3001  — solo red interna               │
+│                                                                  │
+│  POST   /users              GET  /users/by-email/:email          │
+│  POST   /invoices           GET  /invoices?user_id=              │
+│  PATCH  /invoices/:id       GET  /invoices/:id?user_id=          │
+│  PATCH  /invoices/:id/status                                     │
+│  DELETE /invoices/:id?user_id=                                   │
+│  POST   /invoices/items/bulk                                     │
+│  GET    /invoices/items/:invoice_id                              │
+└──────────────────────────────┬───────────────────────────────────┘
+                               │ pg Pool  (postgresql://...)
+                               ▼
 ┌──────────────────────────────────────────────────────────────────┐
 │                   DATABASE (PostgreSQL 16)                       │
 │                          puerto 5432                             │
@@ -71,7 +89,7 @@ El frontend se sirve con el dev server de Vite en modo desarrollo. Vite tiene co
 
 **Responsabilidades:**
 - Autenticación (login / registro) con JWT almacenado en `localStorage`
-- Apertura de la cámara con `navigator.mediaDevices.getUserMedia()`
+- Apertura de cámara con `navigator.mediaDevices.getUserMedia()` o selección de archivo desde disco
 - Captura de foto y envío como `multipart/form-data`
 - Visualización del listado y detalle de facturas procesadas
 
@@ -87,12 +105,31 @@ El frontend se sirve con el dev server de Vite en modo desarrollo. Vite tiene co
 
 **Responsabilidades:**
 - Gestión de JWT (emisión en login/registro, verificación en cada request protegido)
-- Recepción de imágenes con `multer` (límite 10 MB)
+- Recepción de imágenes con `multer` (límite 10 MB, formatos: JPEG, PNG, WebP)
 - Integración con GCP Document AI para extracción de texto
 - Integración con Gemini para análisis e insights
-- CRUD de facturas e ítems en la base de datos
+- Orquestación del flujo de procesamiento — delega todas las operaciones de datos al `db-service` vía HTTP (`dbClient.js`)
 
-### MS3 — Database
+El backend **no tiene acceso directo a PostgreSQL**. Toda operación de datos pasa por el `db-service`.
+
+### MS3 — DB Service
+
+| Atributo | Valor |
+|---|---|
+| Imagen base | `node:20-alpine` |
+| Framework | Express 4 |
+| Puerto interno | 3001 (sin mapeo externo) |
+| Variables de entorno | `DATABASE_URL` |
+
+**Responsabilidades:**
+- Única capa con acceso a PostgreSQL (pool de conexiones con `pg`)
+- Expone una API REST interna para operaciones CRUD de `users`, `invoices` e `invoice_items`
+- Todas las queries usan parámetros posicionales (`$1`, `$2`) — sin interpolación de strings
+- Healthcheck propio: `GET /health` (verificado por Docker antes de iniciar el backend)
+
+El `db-service` no tiene lógica de negocio ni validación de sesión — es una capa de datos pura. La autorización y la lógica residen en el backend.
+
+### MS4 — Database
 
 | Atributo | Valor |
 |---|---|
@@ -105,52 +142,73 @@ El schema se aplica una sola vez cuando el volumen está vacío. Para modificar 
 
 ## Red Docker
 
-Los tres servicios comparten la red `luqo-network` (bridge). La comunicación interna usa los nombres de servicio como hostnames:
+Los cuatro servicios comparten la red `luqo-network` (bridge). La comunicación interna usa los nombres de servicio como hostnames:
 
 ```
-frontend  →  backend   (http://backend:8000)
-backend   →  database  (postgresql://luqo:luqo123@database:5432/luqo_db)
+frontend   →  backend     (http://backend:8000)
+backend    →  db-service  (http://db-service:3001)
+db-service →  database    (postgresql://luqo:luqo123@database:5432/luqo_db)
 ```
 
-El `docker-compose.yml` define un `healthcheck` en el servicio `database` para garantizar que PostgreSQL esté listo antes de iniciar el backend (`depends_on: condition: service_healthy`).
+El `db-service` no tiene puerto mapeado al host — solo es accesible dentro de la red Docker.
+
+### Cadena de arranque y healthchecks
+
+```
+database (healthcheck: pg_isready)
+    ↓ service_healthy
+db-service (healthcheck: GET /health)
+    ↓ service_healthy
+backend
+    ↓ depends_on
+frontend
+```
 
 ## Flujo de autenticación
 
 ```
-Cliente                    Backend                   DB
-  │                           │                       │
-  │── POST /api/auth/login ──▶│                       │
-  │   { email, password }     │── SELECT user ───────▶│
-  │                           │◀─ user row ───────────│
-  │                           │   bcrypt.compare()    │
-  │◀── { token, user } ───────│   jwt.sign()          │
-  │                           │                       │
-  │── GET /api/invoices ──────│                       │
-  │   Authorization: Bearer…  │                       │
-  │                           │   jwt.verify()        │
-  │                           │── SELECT invoices ───▶│
-  │◀── { invoices: [...] } ───│◀─ rows ───────────────│
+Cliente                  Backend              DB-Service             DB
+  │                          │                     │                   │
+  │── POST /api/auth/login ─▶│                     │                   │
+  │   { email, password }    │── GET /users/──────▶│                   │
+  │                          │   by-email/:email   │── SELECT user ───▶│
+  │                          │                     │◀─ user row ───────│
+  │                          │◀─ { user + hash } ──│                   │
+  │                          │   bcrypt.compare()  │                   │
+  │                          │   jwt.sign()        │                   │
+  │◀── { token, user } ──────│                     │                   │
+  │                          │                     │                   │
+  │── GET /api/invoices ────▶│                     │                   │
+  │   Authorization: Bearer… │── GET /invoices? ──▶│                   │
+  │                          │   user_id=…         │── SELECT ────────▶│
+  │                          │                     │◀─ rows ───────────│
+  │◀── { invoices: [...] } ──│◀─ [ invoices ] ─────│                   │
 ```
 
 ## Flujo de procesamiento de una factura
 
 ```
-Cliente          Backend         Document AI        Gemini           DB
-  │                 │                 │                │              │
-  │─ POST /invoice ▶│                 │                │              │
-  │  (imagen)       │── INSERT ──────────────────────────────────────▶│
-  │                 │   status=processing              │              │
-  │                 │                 │                │              │
-  │                 │── processDoc ──▶│                │              │
-  │                 │◀── raw text ────│                │              │
-  │                 │   (valida > 10 chars)            │              │
-  │                 │                 │                │              │
-  │                 │─────────────────────── prompt ──▶│              │
-  │                 │◀─────────────────────── JSON ────│              │
-  │                 │   { structured, insights }       │              │
-  │                 │                 │                │              │
-  │                 │── UPDATE invoice ──────────────────────────────▶│
-  │                 │── INSERT items ────────────────────────────────▶│
-  │                 │                 │                │              │
-  │◀── 201 { invoice, items } ────────────────────────────────────────│
+Cliente         Backend        Doc AI      Gemini     DB-Service       DB
+  │                │               │           │           │            │
+  │─ POST /invoice▶│               │           │           │            │
+  │  (imagen)      │── POST /invoices ────────────────────▶│            │
+  │                │   { user_id, image_path } │           │── INSERT ─▶│
+  │                │◀──────────────────────────────────────│  status=   │
+  │                │   { id }                  │           │  processing│
+  │                │               │           │           │            │
+  │                │── processDoc ▶│           │           │            │
+  │                │◀── raw text ──│           │           │            │
+  │                │   (valida > 10 chars)     │           │            │
+  │                │               │           │           │            │
+  │                │─────────────────── prompt▶│           │            │
+  │                │◀────────────────── JSON ──│           │            │
+  │                │  { structured, insights } │           │            │
+  │                │               │           │           │            │
+  │                │── PATCH /invoices/:id ───────────────▶│            │
+  │                │   (campos estructurados)  │           │── UPDATE ─▶│
+  │                │◀──────────────────────────────────────│            │
+  │                │── POST /invoices/items/bulk ─────────▶│            │
+  │                │◀──────────────────────────────────────│── INSERT ─▶│
+  │                │               │           │           │            │
+  │◀── 201 { invoice, items } ──────────────────────────────────────────│
 ```
