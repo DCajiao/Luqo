@@ -1,0 +1,70 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: backend
+  namespace: luqo
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app: backend
+  template:
+    metadata:
+      labels:
+        app: backend
+    spec:
+      containers:
+      - name: backend
+        image: 381491960576.dkr.ecr.us-east-1.amazonaws.com/luqo-backend:latest
+        ports:
+        - containerPort: 8000
+        env:
+        - name: DB_SERVICE_URL
+          value: "http://db-service-svc:3001"
+        - name: JWT_SECRET
+          valueFrom:
+            secretKeyRef:
+              name: luqo-secrets
+              key: JWT_SECRET
+        - name: GEMINI_API_KEY
+          valueFrom:
+            secretKeyRef:
+              name: luqo-secrets
+              key: GEMINI_API_KEY
+        - name: GCP_PROJECT_ID
+          valueFrom:
+            secretKeyRef:
+              name: luqo-secrets
+              key: GCP_PROJECT_ID
+        - name: DOCUMENT_AI_PROCESSOR_ID
+          valueFrom:
+            secretKeyRef:
+              name: luqo-secrets
+              key: DOCUMENT_AI_PROCESSOR_ID
+        - name: PORT
+          value: "8000"
+        - name: NODE_ENV
+          value: "production"
+        - name: GOOGLE_APPLICATION_CREDENTIALS
+          value: "/app/credentials/gcp-key.json"
+        volumeMounts:
+        - name: gcp-credentials
+          mountPath: /app/credentials
+          readOnly: true
+      volumes:
+      - name: gcp-credentials
+        secret:
+          secretName: gcp-credentials
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: backend-service
+  namespace: luqo
+spec:
+  selector:
+    app: backend
+  ports:
+  - port: 8000
+    targetPort: 8000
+  type: ClusterIP
