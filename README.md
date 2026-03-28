@@ -1,7 +1,8 @@
 # 🧾 Luqo — Despliegue en Amazon EKS
 
 **Computación en la Nube — Práctica 5**  
-**Estudiante:** Jhorman A. Villanueva Vivas  
+**Integrantes:** *[Natalia Moreno Montoya](https://github.com/natam226)*, *[David Cajiao Lazt](https://github.com/DCajiao)*, *[Valentina Bueno Collazos](https://github.com/valentinabc19)*
+
 **Universidad Autónoma de Occidente**
 
 ---
